@@ -1,0 +1,235 @@
+#define BLYNK_TEMPLATE_ID "TMPL3sLE4VYEt"
+#define BLYNK_TEMPLATE_NAME "Medicine Reminder Box"
+#define BLYNK_AUTH_TOKEN "PASTE_YOUR_NEW_BLYNK_AUTH_TOKEN"
+
+#include <WiFi.h>
+#include <BlynkSimpleEsp32.h>
+#include <Wire.h>
+#include <RTClib.h>
+#include <LiquidCrystal_I2C.h>
+
+// WiFi Details
+char ssid[] = "YOUR_WIFI_NAME";
+char pass[] = "YOUR_WIFI_PASSWORD";
+
+// Pin Connections
+#define LED_PIN 26
+#define BUZZER_PIN 25
+#define BUTTON_TAKEN 18
+#define BUTTON_SNOOZE 19
+
+// RTC and LCD
+RTC_DS3231 rtc;
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+BlynkTimer timer;
+
+bool alarmActive = false;
+bool morningDone = false;
+bool afternoonDone = false;
+bool nightDone = false;
+
+int lastDay = -1;
+int snoozeUntil = -1;
+
+String reminderName = "";
+String medicineStatus = "Waiting";
+
+// Reminder Times
+const int morningHour = 8;
+const int afternoonHour = 13;
+const int nightHour = 20;
+
+void startReminder(String name) {
+  alarmActive = true;
+  reminderName = name;
+  medicineStatus = "Waiting";
+
+  digitalWrite(LED_PIN, HIGH);
+  digitalWrite(BUZZER_PIN, HIGH);
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(name + " Medicine");
+  lcd.setCursor(0, 1);
+  lcd.print("Take Medicine!");
+
+  Blynk.virtualWrite(V0, 1);
+  Blynk.virtualWrite(V1, name);
+  Blynk.virtualWrite(V2, medicineStatus);
+
+  Blynk.logEvent(
+    "medicine_reminder",
+    name + " medicine reminder. Please take your medicine."
+  );
+}
+
+void stopReminder() {
+  alarmActive = false;
+  snoozeUntil = -1;
+
+  digitalWrite(LED_PIN, LOW);
+  digitalWrite(BUZZER_PIN, LOW);
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Medicine Taken");
+  lcd.setCursor(0, 1);
+  lcd.print("Good Job!");
+
+  medicineStatus = "Taken";
+
+  Blynk.virtualWrite(V0, 0);
+  Blynk.virtualWrite(V2, medicineStatus);
+}
+
+void snoozeReminder() {
+  if (alarmActive) {
+    alarmActive = false;
+
+    digitalWrite(LED_PIN, LOW);
+    digitalWrite(BUZZER_PIN, LOW);
+
+    DateTime now = rtc.now();
+    DateTime snoozeTime = now + TimeSpan(0, 0, 5, 0);
+
+    snoozeUntil = snoozeTime.hour() * 60 + snoozeTime.minute();
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Reminder Snoozed");
+    lcd.setCursor(0, 1);
+    lcd.print("After 5 Minutes");
+
+    Blynk.virtualWrite(V0, 0);
+  }
+}
+
+void checkReminder() {
+  DateTime now = rtc.now();
+
+  if (now.day() != lastDay) {
+    lastDay = now.day();
+    morningDone = false;
+    afternoonDone = false;
+    nightDone = false;
+  }
+
+  int currentMinutes = now.hour() * 60 + now.minute();
+
+  // Snooze reminder
+  if (snoozeUntil >= 0 && currentMinutes == snoozeUntil) {
+    snoozeUntil = -1;
+    startReminder(reminderName);
+    return;
+  }
+
+  // Morning reminder
+  if (now.hour() == morningHour &&
+      now.minute() == 0 &&
+      !morningDone) {
+    morningDone = true;
+    startReminder("Morning");
+  }
+
+  // Afternoon reminder
+  if (now.hour() == afternoonHour &&
+      now.minute() == 0 &&
+      !afternoonDone) {
+    afternoonDone = true;
+    startReminder("Afternoon");
+  }
+
+  // Night reminder
+  if (now.hour() == nightHour &&
+      now.minute() == 0 &&
+      !nightDone) {
+    nightDone = true;
+    startReminder("Night");
+  }
+}
+
+void checkButtons() {
+  static bool lastTaken = HIGH;
+  static bool lastSnooze = HIGH;
+
+  bool takenState = digitalRead(BUTTON_TAKEN);
+  bool snoozeState = digitalRead(BUTTON_SNOOZE);
+
+  if (lastTaken == HIGH && takenState == LOW) {
+    if (alarmActive) {
+      stopReminder();
+    }
+  }
+
+  if (lastSnooze == HIGH && snoozeState == LOW) {
+    snoozeReminder();
+  }
+
+  lastTaken = takenState;
+  lastSnooze = snoozeState;
+}
+
+void updateDisplay() {
+  if (!alarmActive) {
+    DateTime now = rtc.now();
+
+    lcd.setCursor(0, 0);
+    lcd.print("Medicine Reminder");
+
+    lcd.setCursor(0, 1);
+
+    char timeText[17];
+    sprintf(timeText, "%02d:%02d:%02d",
+            now.hour(), now.minute(), now.second());
+
+    lcd.print(timeText);
+    lcd.print("        ");
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(LED_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+
+  pinMode(BUTTON_TAKEN, INPUT_PULLUP);
+  pinMode(BUTTON_SNOOZE, INPUT_PULLUP);
+
+  digitalWrite(LED_PIN, LOW);
+  digitalWrite(BUZZER_PIN, LOW);
+
+  Wire.begin(21, 22);
+
+  lcd.init();
+  lcd.backlight();
+
+  lcd.setCursor(0, 0);
+  lcd.print("Medicine Box");
+  lcd.setCursor(0, 1);
+  lcd.print("Starting...");
+
+  if (!rtc.begin()) {
+    lcd.clear();
+    lcd.print("RTC Not Found!");
+    while (1);
+  }
+
+  if (rtc.lostPower()) {
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  }
+
+  Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
+
+  timer.setInterval(1000L, checkReminder);
+  timer.setInterval(200L, checkButtons);
+  timer.setInterval(1000L, updateDisplay);
+
+  lcd.clear();
+}
+
+void loop() {
+  Blynk.run();
+  timer.run();
+}
